@@ -1,0 +1,90 @@
+#!/usr/bin/env perl
+
+# Copyright (c) 2016 Graham Edgecombe <gpe@grahamedgecombe.com>
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+use strict;
+use warnings;
+
+use Convert::TNEF;
+use File::Temp qw(tempdir);
+use File::MMagic;
+use Getopt::Long;
+use MIME::Entity;
+use MIME::Parser;
+
+GetOptions(
+    '--purge' => \my $purge
+) or exit 1;
+
+my $magic = File::MMagic->new;
+
+my $parser = MIME::Parser->new;
+$parser->output_dir(tempdir(CLEANUP => 1));
+
+my $message = $parser->parse(\*STDIN);
+
+my $type = $message->head->mime_attr('Content-Type');
+if ($type eq 'multipart/mixed') {
+    my @parts;
+
+    foreach my $part ($message->parts) {
+        $type = $part->head->mime_attr('Content-Type');
+
+        if ($type eq 'application/ms-tnef') {
+            push @parts, $part unless $purge;
+            push @parts, unpack_tnef($part);
+        } else {
+            push @parts, $part;
+        }
+    }
+
+    $message->parts(\@parts);
+}
+
+$message->print(\*STDOUT);
+
+sub unpack_tnef {
+    my $part = shift;
+
+    my @parts;
+
+    my $tnef = Convert::TNEF->read_ent($part, {
+        output_dir => tempdir(CLEANUP => 1)
+    });
+
+    foreach my $attachment ($tnef->attachments) {
+        my $name = $attachment->longname;
+        my $data = $attachment->datahandle;
+
+        my ($type, %attrs);
+        if ($data->path) {
+            $type = $magic->checktype_filename($data->path);
+            $attrs{Path} = $data->path;
+        } else {
+            $type = $magic->checktype_contents($data->as_string);
+            $attrs{Data} = $data->as_string;
+        }
+
+        push @parts, MIME::Entity->build(
+            Filename    => $name,
+            Type        => $type,
+            Disposition => 'attachment',
+            Top         => 0,
+            %attrs
+        );
+    }
+
+    return @parts;
+}
